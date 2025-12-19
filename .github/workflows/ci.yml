@@ -11,6 +11,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
 
       - name: Build
         run: cargo build --verbose
@@ -20,10 +22,16 @@ jobs:
           RUSTFLAGS: "-Z sanitizer=address"
         run: cargo test --verbose
 
+      - name: Test with Miri
+        run: cargo miri test --verbose
+
       - name: Test with Realloc
         env:
           RUSTFLAGS: "-Z sanitizer=address"
         run: cargo test --features realloc --verbose
+
+      - name: Test with Realloc with Miri
+        run: cargo miri test --features realloc --verbose
 
       - name: Build Fuzz Docker Image
         run: docker build -t lite-alloc-fuzz .
