@@ -20,7 +20,7 @@ jobs:
       - name: Test
         env:
           RUSTFLAGS: "-Z sanitizer=address"
-        run: cargo test --verbose
+        run: cargo test --target x86_64-unknown-linux-gnu --verbose
 
       - name: Test with Miri
         run: cargo miri test --verbose
@@ -28,7 +28,7 @@ jobs:
       - name: Test with Realloc
         env:
           RUSTFLAGS: "-Z sanitizer=address"
-        run: cargo test --features realloc --verbose
+        run: cargo test --features realloc --target x86_64-unknown-linux-gnu --verbose
 
       - name: Test with Realloc with Miri
         run: cargo miri test --features realloc --verbose
