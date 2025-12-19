@@ -36,6 +36,7 @@ impl SafeAllocator {
     }
 
     #[cfg(feature = "realloc")]
+    #[allow(dead_code)]
     fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         unsafe { self.inner.realloc(ptr, layout, new_size) }
     }

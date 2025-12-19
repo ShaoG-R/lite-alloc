@@ -12,7 +12,7 @@ struct SafeAllocator {
 
 impl SafeAllocator {
     fn new() -> Self {
-        let guard = TEST_MUTEX.lock().unwrap();
+        let guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             SegregatedBumpAllocator::reset();
             reset_heap();
@@ -141,7 +141,12 @@ fn test_realloc_bin_growth() {
     let ptr = allocator.alloc(l16);
     unsafe { ptr.write(0x11) };
 
+    // Alloc obstacle to prevent in-place growth
+    // Allocator is simple bump pointer (initially), so this advances HEAP_TOP.
+    let _obstacle = allocator.alloc(l16);
+
     // Grow to 32
+    // Since ptr is no longer at HEAP_TOP, it must move.
     let ptr_new = allocator.realloc(ptr, l16, 32);
     assert_ne!(ptr, ptr_new); // Must move to new bin/block
     unsafe { assert_eq!(*ptr_new, 0x11) };
