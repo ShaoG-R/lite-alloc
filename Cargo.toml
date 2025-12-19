@@ -11,7 +11,7 @@ documentation = "https://docs.rs/lite-alloc"
 readme = "README.md"
 keywords = ["allocator", "wasm", "no_std", "embedded", "memory"]
 categories = ["memory-management", "embedded", "wasm", "no-std"]
-include = ["src/**/*", "tests/**/*","Cargo.toml", "README.md", "README_CN.md", "LICENSE"]
+include = ["src/**/*", "tests/**/*", "benches/**/*", "Cargo.toml", "README.md", "README_CN.md", "LICENSE"]
 
 [dependencies]
 
