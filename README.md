@@ -54,11 +54,11 @@ A general-purpose allocator using a sorted linked list with block coalescing.
 
 ## Usage
 
-Add `lite_alloc` to your `Cargo.toml`.
+Add `lite-alloc` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-lite_alloc = "0.1.0"
+lite-alloc = "0.1.0"
 ```
 
 To use one of the allocators as your global allocator in a `no_std` / Wasm project:

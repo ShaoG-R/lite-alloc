@@ -1,13 +1,13 @@
 [package]
-name = "lite_alloc"
+name = "lite-alloc"
 version = "0.1.0"
 edition = "2024"
 authors = ["ShaoG <shaog.rs@gmail.com>"]
 description = "A lightweight, single-threaded memory allocator designed for WebAssembly and embedded systems."
 license = "MIT"
-repository = "https://github.com/ShaoG-R/lite_alloc"
-homepage = "https://github.com/ShaoG-R/lite_alloc"
-documentation = "https://docs.rs/lite_alloc"
+repository = "https://github.com/ShaoG-R/lite-alloc"
+homepage = "https://github.com/ShaoG-R/lite-alloc"
+documentation = "https://docs.rs/lite-alloc"
 readme = "README.md"
 keywords = ["allocator", "wasm", "no_std", "embedded", "memory"]
 categories = ["memory-management", "embedded", "wasm", "no-std"]

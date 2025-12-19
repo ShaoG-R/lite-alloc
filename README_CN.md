@@ -54,11 +54,11 @@ Lite Alloc 提供了三种不同的分配器实现，你可以根据具体的应
 
 ## 使用方法
 
-将 `lite_alloc` 添加到你的 `Cargo.toml` 中。
+将 `lite-alloc` 添加到你的 `Cargo.toml` 中。
 
 ```toml
 [dependencies]
-lite_alloc = "0.1.0"
+lite-alloc = "0.1.0"
 ```
 
 在 `no_std` / Wasm 项目中将其中一个配置为全局分配器：

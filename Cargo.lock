@@ -206,7 +206,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lite_alloc"
+name = "lite-alloc"
 version = "0.1.0"
 dependencies = [
  "criterion",
