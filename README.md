@@ -5,6 +5,8 @@
 Lite Alloc is a lightweight, single-threaded memory allocator library for Rust, specifically designed for **WebAssembly (Wasm)** and **embedded systems**. It focuses on minimizing code size (binary footprint) and maximizing performance in single-threaded environments.
 
 > **Warning**: These allocators are **single-threaded**. While they implement `Sync` to satisfy the `GlobalAlloc` trait, using them in a multi-threaded environment will result in Undefined Behavior (UB). Use them only in environments typically known to be single-threaded, such as Wasm or specific embedded targets.
+>
+> **Note**: This project is currently **experimental**. While core functionality is implemented, it has not yet undergone comprehensive test coverage (including edge case validation). Please test thoroughly before using in production environments.
 
 [中文文档](./README_CN.md)
 

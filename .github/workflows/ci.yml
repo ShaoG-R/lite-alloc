@@ -10,15 +10,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Build
         run: cargo build --verbose
 
       - name: Test
+        env:
+          RUSTFLAGS: "-Z sanitizer=address"
         run: cargo test --verbose
 
       - name: Test with Realloc
+        env:
+          RUSTFLAGS: "-Z sanitizer=address"
         run: cargo test --features realloc --verbose
 
       - name: Build Fuzz Docker Image
