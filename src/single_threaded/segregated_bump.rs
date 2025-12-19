@@ -1,5 +1,11 @@
 use crate::{PAGE_SIZE, grow_memory};
 
+/// Safety Warning:
+/// Allocators in this module are designed for [Single Threaded] environments.
+/// `Sync` is implemented only to satisfy `GlobalAlloc` trait requirements.
+/// Using this allocator in a multi-threaded environment will lead to Undefined Behavior (UB).
+/// Please ensure it is used only in single-threaded environments (e.g., WASM or single-threaded embedded).
+///
 /// 安全性警示 (Safety Warning):
 /// 本模块中的分配器均为【单线程】设计。
 /// 实现了 `Sync` 仅为了满足 `GlobalAlloc` trait 的要求。
@@ -11,12 +17,26 @@ use core::{
     ptr::null_mut,
 };
 
-/// 固定分箱 + Bump Pointer 回退的极简分配器。
+/// Minimal Allocator with Fixed Bins + Bump Pointer Fallback.
+///
+/// 极简固定分箱 + Bump Pointer 回退分配器。
+///
+/// # Design Philosophy
+/// - **Extreme Size**: Abandon Coalescing and Splitting, remove all complex list traversals and metadata headers.
+/// - **Speed First**: Small object allocation/deallocation are strictly O(1).
+/// - **Use Cases**: Wasm Serverless functions, short-lived scripts, or scenarios with ample memory but sensitive to startup speed/size.
 ///
 /// # 设计哲学
 /// - **极简体积**：放弃合并（Coalescing）与拆分（Splitting），移除所有复杂的链表遍历和元数据头。
 /// - **速度优先**：小对象分配/释放均为严格的 O(1)。
 /// - **场景定位**：Wasm Serverless 函数、短生命周期脚本、或内存充裕但对启动速度/体积敏感的场景。
+///
+/// # Memory Layout
+/// - **Bin 0**: 16 Bytes (for Box<u8>, small structs)
+/// - **Bin 1**: 32 Bytes
+/// - **Bin 2**: 64 Bytes
+/// - **Bin 3**: 128 Bytes
+/// - **Large**: > 128 Bytes, allocated directly using Bump Pointer, not reused.
 ///
 /// # 内存布局
 /// - **Bin 0**: 16 Bytes (用于 Box<u8>, small structs)
@@ -31,6 +51,8 @@ impl SegregatedBumpAllocator {
         SegregatedBumpAllocator
     }
 
+    /// ⚠️ Test/Bench only: Reset global state
+    ///
     /// ⚠️ 仅用于测试/Bench：重置全局状态
     pub unsafe fn reset() {
         unsafe {
@@ -41,25 +63,33 @@ impl SegregatedBumpAllocator {
     }
 }
 
+// Singly linked list node, embedded in free memory blocks
 // 单链表节点，嵌入在空闲内存块中
 struct Node {
     next: *mut Node,
 }
 
 // --------------------------------------------------------------------------
+// Global Static State (Safe in single-threaded Wasm)
 // 全局静态状态 (在单线程 Wasm 中是安全的)
 // --------------------------------------------------------------------------
 
+// 4 bins head pointers. BINS[0] -> 16B, [1] -> 32B, [2] -> 64B, [3] -> 128B
 // 4个桶的头指针。BINS[0] -> 16B, [1] -> 32B, [2] -> 64B, [3] -> 128B
 static mut BINS: [*mut Node; 4] = [null_mut(); 4];
 
+// Bump Pointer (Heap Top Pointer)
 // Bump Pointer (堆顶指针)
 static mut HEAP_TOP: usize = 0;
+// Current Wasm memory boundary
 // 当前已申请的 Wasm 内存边界
 static mut HEAP_END: usize = 0;
 
 unsafe impl GlobalAlloc for SegregatedBumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // 1. Large alignment handling
+        // Fixed Bins default guarantee 16-byte alignment.
+        // If user requests > 16-byte alignment (very rare), handle directly via Bump allocation.
         // 1. 大对齐处理
         // 固定 Bins 默认保证 16 字节对齐。
         // 如果用户请求 > 16 字节对齐（非常罕见），直接通过 Bump 分配来处理对齐。
@@ -67,14 +97,17 @@ unsafe impl GlobalAlloc for SegregatedBumpAllocator {
             return unsafe { self.bump_alloc(layout.size(), layout.align()) };
         }
 
+        // 2. Calculate category
         // 2. 计算分类
         let size = layout.size().max(16);
 
+        // 3. Try lookup reuse (Small Alloc)
         // 3. 尝试查表复用 (Small Alloc)
         if let Some(index) = get_index(size) {
             unsafe {
                 let head = BINS[index];
                 if !head.is_null() {
+                    // Hit: Pop from list head (LIFO)
                     // Hit: 弹出链表头 (LIFO)
                     let next = (*head).next;
                     BINS[index] = next;
@@ -82,18 +115,24 @@ unsafe impl GlobalAlloc for SegregatedBumpAllocator {
                 }
             }
 
+            // Miss: Bin is empty, fallback to Bump allocation
+            // Allocate block of corresponding Bin size directly, instead of layout.size(), so it can be returned correctly later
             // Miss: Bin 为空，回退到 Bump 分配
             // 直接分配对应 Bin 大小的块，而不是 layout.size()，以便将来 dealloc 能正确归位
             let block_size = 16 << index;
             return unsafe { self.bump_alloc(block_size, 16) };
         }
 
+        // 4. Large object handling (> 128 Bytes)
+        // Alloc via Bump directly, skip Bins
         // 4. 大对象处理 (> 128 Bytes)
         // 直接 Bump 分配，不走 Bin
         unsafe { self.bump_alloc(size, 16) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // 1. If block has high alignment requirement, it must not be from Bins,
+        //    and because we don't have metadata for its size, just discard it (leak).
         // 1. 如果是对齐要求很高的块，它一定不是来自 Bins，
         //    且我们没有元数据记录它的大小，所以直接丢弃（泄漏）。
         if layout.align() > 16 {
@@ -102,9 +141,11 @@ unsafe impl GlobalAlloc for SegregatedBumpAllocator {
 
         let size = layout.size().max(16);
 
+        // 2. Try to return to Bins
         // 2. 尝试归还到 Bins
         if let Some(index) = get_index(size) {
             let node = ptr as *mut Node;
+            // Insert at head (O(1))
             // 头插法 (O(1))
             unsafe {
                 (*node).next = BINS[index];
@@ -113,6 +154,9 @@ unsafe impl GlobalAlloc for SegregatedBumpAllocator {
             return;
         }
 
+        // 3. Large Object (> 128 Bytes)
+        // Strategy choice: Abandon large object reuse for minimal size.
+        // They will be reclaimed when Wasm instance is destroyed.
         // 3. 大对象 (> 128 Bytes)
         // 策略选择：为了极简体积，放弃大对象复用。
         // 它们会随 Wasm 实例销毁而回收。
@@ -120,6 +164,7 @@ unsafe impl GlobalAlloc for SegregatedBumpAllocator {
 
     #[cfg(feature = "realloc")]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // 1. Determine actual capacity of old block
         // 1. 确定旧块的实际容量
         let old_size = layout.size().max(16);
         let old_capacity = if layout.align() > 16 {
@@ -130,11 +175,14 @@ unsafe impl GlobalAlloc for SegregatedBumpAllocator {
             old_size
         };
 
+        // 2. If new size <= old capacity, reuse directly (In-place shrink)
         // 2. 如果新大小 <= 旧容量，直接复用 (In-place shrink)
         if new_size <= old_capacity {
             return ptr;
         }
 
+        // 3. Try to grow in place (In-place grow at HEAP_TOP)
+        // Only possible if ptr is exactly at heap top.
         // 3. 尝试原地扩容 (In-place grow at HEAP_TOP)
         // 只有当 ptr 恰好在堆顶时才可能。
         let heap_top = unsafe { HEAP_TOP };
@@ -142,6 +190,7 @@ unsafe impl GlobalAlloc for SegregatedBumpAllocator {
             let diff = new_size - old_capacity;
             let heap_end = unsafe { HEAP_END };
 
+            // Check if there is enough remaining space or grow memory
             // 检查是否有足够的剩余空间或扩容
             unsafe {
                 if HEAP_TOP + diff <= heap_end {
@@ -159,6 +208,7 @@ unsafe impl GlobalAlloc for SegregatedBumpAllocator {
             }
         }
 
+        // 4. Default fallback: Alloc + Copy + Dealloc
         // 4. 默认回退：Alloc + Copy + Dealloc
         unsafe {
             let new_ptr = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
@@ -173,17 +223,22 @@ unsafe impl GlobalAlloc for SegregatedBumpAllocator {
 }
 
 impl SegregatedBumpAllocator {
+    /// Core Bump Pointer allocation logic
     /// 核心 Bump Pointer 分配逻辑
     unsafe fn bump_alloc(&self, size: usize, align: usize) -> *mut u8 {
         unsafe {
             let mut ptr = HEAP_TOP;
 
+            // Handle alignment: (ptr + align - 1) & !(align - 1)
+            // For align=16, it means (ptr + 15) & !15
             // 处理对齐: (ptr + align - 1) & !(align - 1)
             // 对于 align=16，即 (ptr + 15) & !15
             ptr = (ptr + align - 1) & !(align - 1);
 
+            // Check for overflow or insufficient capacity
             // 检查溢出或容量不足
             if ptr + size > HEAP_END || ptr < HEAP_TOP {
+                // How many pages needed?
                 // 需要多少页？
                 let bytes_needed = (ptr + size).saturating_sub(HEAP_END);
                 let pages_needed = ((bytes_needed + PAGE_SIZE - 1) / PAGE_SIZE).max(1);
@@ -193,12 +248,16 @@ impl SegregatedBumpAllocator {
                     return null_mut(); // OOM
                 }
 
+                // If initial allocation (HEAP_END == 0), need to initialize ptr
                 // 如果是初次分配 (HEAP_END == 0)，需要初始化 ptr
                 if HEAP_END == 0 {
+                    // prev_page should be 0 (or existing memory size)
+                    // Wasm memory_grow returns old page count
                     // prev_page 应该是 0 (或者现有内存大小)
                     // Wasm memory_grow 返回旧的页数
                     let memory_start = prev_page * PAGE_SIZE;
                     ptr = memory_start;
+                    // Re-align
                     // 再次对齐
                     ptr = (ptr + align - 1) & !(align - 1);
 
@@ -215,9 +274,14 @@ impl SegregatedBumpAllocator {
 }
 
 // --------------------------------------------------------------------------
+// Helper Functions
 // 辅助函数
 // --------------------------------------------------------------------------
 
+/// Get Bin index based on size.
+/// 0 -> 16B, 1 -> 32B, 2 -> 64B, 3 -> 128B
+/// Returns None indicating large object.
+///
 /// 根据大小获取 Bin 索引。
 /// 0 -> 16B, 1 -> 32B, 2 -> 64B, 3 -> 128B
 /// 返回 None 表示是大对象。
@@ -227,16 +291,24 @@ fn get_index(size: usize) -> Option<usize> {
         return None;
     }
 
+    // Use CLZ (Count Leading Zeros) instruction to quickly calculate log2
+    // size 16 (10000) -> index 0
+    // size 17..32 -> index 1
+    // ...
     // 利用 CLZ (Count Leading Zeros) 指令快速计算 log2
     // size 16 (10000) -> index 0
     // size 17..32 -> index 1
     // ...
     let size_val = size as usize;
 
+    // next_power_of_two ensures 17 becomes 32
     // next_power_of_two 确保 17 变成 32
     let power_of_two = size_val.next_power_of_two();
     let zeros = power_of_two.leading_zeros();
 
+    // Calculate base offset.
+    // u32: leading_zeros(16) = 27.  Target index = 0. => 27 - 27 = 0
+    // u64: leading_zeros(16) = 59.  Target index = 0. => 59 - 59 = 0
     // 计算基准偏移。
     // u32: leading_zeros(16) = 27.  Target index = 0. => 27 - 27 = 0
     // u64: leading_zeros(16) = 59.  Target index = 0. => 59 - 59 = 0

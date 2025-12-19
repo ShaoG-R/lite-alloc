@@ -5,6 +5,12 @@ use core::{
     ptr::{self, null_mut},
 };
 
+/// Safety Warning:
+/// Allocators in this module are designed for [Single Threaded] environments.
+/// `Sync` is implemented only to satisfy `GlobalAlloc` trait requirements.
+/// Using this allocator in a multi-threaded environment will lead to Undefined Behavior (UB).
+/// Please ensure it is used only in single-threaded environments (e.g., WASM or single-threaded embedded).
+///
 /// 安全性警示 (Safety Warning):
 /// 本模块中的分配器均为【单线程】设计。
 /// 实现了 `Sync` 仅为了满足 `GlobalAlloc` trait 的要求。
@@ -12,6 +18,11 @@ use core::{
 /// 请确保只在单线程环境（如 WASM 或单线程嵌入式环境）中使用。
 unsafe impl Sync for FreeListAllocator {}
 
+/// A non-thread-safe allocator using a free list.
+/// Complexity of allocation and deallocation is O(length of free list).
+///
+/// The free list is sorted by address, and adjacent memory blocks are merged when inserting new blocks.
+///
 /// 一个使用空闲链表的非线程安全分配器。
 /// 分配和释放操作的时间复杂度为 O(空闲链表长度)。
 ///
@@ -30,6 +41,10 @@ impl FreeListAllocator {
 
 const EMPTY_FREE_LIST: *mut FreeListNode = usize::MAX as *mut FreeListNode;
 
+/// Stored at the beginning of each free segment.
+/// Note: This could be packed into 1 word (using low bits to mark this case,
+/// and only using the second word when allocation size is larger than 1 word).
+///
 /// 存储在每个空闲段的开头。
 /// 注意：可以将其放入 1 个字中（使用低位标记该情况，
 /// 然后仅在分配大小大于 1 个字时使用第二个字）
@@ -40,30 +55,43 @@ struct FreeListNode {
 
 const NODE_SIZE: usize = core::mem::size_of::<FreeListNode>();
 
+// Safety: No one else owns the raw pointer, so we can safely transfer
+// FreeListAllocator to another thread.
+//
 // 安全性：除我们之外没有人拥有原始指针，因此我们可以安全地将
 // FreeListAllocator 转移到另一个线程。
 unsafe impl Send for FreeListAllocator {}
 
 unsafe impl GlobalAlloc for FreeListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // 1. Force fixed alignment to 16 bytes (covering u8 to u128/v128)
+        // This saves you from complex dynamic alignment logic reading layout.align()
         // 1. 强制固定对齐为 16 字节 (覆盖 u8 到 u128/v128)
         // 这样你就不用读取 layout.align() 来做复杂的动态对齐逻辑了
         const MIN_ALIGN: usize = 16;
 
+        // 2. If user requests more aggressive alignment (e.g. 4KB page alignment), must handle or fail
+        // For size, you can choose not to support alignment > 16 (return null or panic)
         // 2. 如果用户请求了更变态的对齐 (比如 4KB 对齐的页)，必须处理或失败
         // 为了体积，你可以选择直接不支持超过 16 的对齐（直接返回 null 或 panic）
         if layout.align() > MIN_ALIGN {
             return null_mut();
         }
 
+        // 3. Calculate size: round up to multiple of 16
+        // Assume NODE_SIZE is also 16 bytes or smaller
         // 3. 计算大小：向上取整到 16 的倍数
         // 假设 NODE_SIZE 也是 16 字节或更小
         let size = layout.size().max(NODE_SIZE);
-        let size = (size + 15) & !15; // 快速位运算取整 (等同于 round_up to 16)
+        // Fast bitwise round up to 16
+        // 快速位运算取整 (等同于 round_up to 16)
+        let size = (size + 15) & !15;
 
         let mut free_list: *mut *mut FreeListNode = self.free_list.get();
+        // Search the free list
         // 搜索空闲链表
         loop {
+            // SAFETY: Dereferencing free_list is safe
             // SAFETY: 解引用 free_list 是安全的
             if unsafe { *free_list == EMPTY_FREE_LIST } {
                 break;
@@ -74,6 +102,7 @@ unsafe impl GlobalAlloc for FreeListAllocator {
 
             if size <= node_size {
                 let remaining = node_size - size;
+                // If remaining space is large enough, keep it in the list
                 // 如果剩余空间足够大，我们将其保留在链表中
                 if remaining >= NODE_SIZE {
                     unsafe {
@@ -81,6 +110,7 @@ unsafe impl GlobalAlloc for FreeListAllocator {
                         return (node as *mut u8).add(remaining);
                     }
                 } else {
+                    // Otherwise, allocate the whole block
                     // 否则，整个块都分配出去
                     unsafe {
                         *free_list = (*node).next;
@@ -88,12 +118,14 @@ unsafe impl GlobalAlloc for FreeListAllocator {
                     }
                 }
             }
+            // SAFETY: Move to next node.
             // SAFETY: 移动到下一个节点。
             unsafe {
                 free_list = ptr::addr_of_mut!((*node).next);
             }
         }
 
+        // No space found in free list.
         // 未在空闲链表中找到空间。
         let requested_bytes = round_up(size, PAGE_SIZE);
         // SAFETY: Call global grow_memory (shimmed on non-wasm)
@@ -103,6 +135,7 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         }
 
         let ptr = (previous_page_count * PAGE_SIZE) as *mut u8;
+        // SAFETY: Recursive call to self to add new memory block.
         // SAFETY: 递归调用自身，添加新的内存块。
         unsafe {
             self.dealloc(
@@ -117,15 +150,22 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         debug_assert!(ptr.align_offset(NODE_SIZE) == 0);
         let ptr = ptr as *mut FreeListNode;
         let size = full_size(layout);
+        // SAFETY: Pointer arithmetic
         // SAFETY: 指针算术
-        let after_new = unsafe { offset_bytes(ptr, size) }; // 用于在相邻时与下一个节点合并。
+        // Used to merge with the next node if adjacent.
+        // 用于在相邻时与下一个节点合并。
+        let after_new = unsafe { offset_bytes(ptr, size) };
 
+        // SAFETY: Get UnsafeCell pointer
         // SAFETY: 获取 UnsafeCell 指針
         let mut free_list: *mut *mut FreeListNode = self.free_list.get();
+        // Insert into free list, sorted by pointer descending.
         // 插入到空闲链表中，该链表按指针降序存储。
         loop {
+            // SAFETY: Dereference free_list to check if empty or compare address
             // SAFETY: 解引用 free_list 检查是否为空或比较地址
             if unsafe { *free_list == EMPTY_FREE_LIST } {
+                // SAFETY: Write new node and insert at head
                 // SAFETY: 写入新节点并插入链表头
                 unsafe {
                     (*ptr).next = EMPTY_FREE_LIST;
@@ -135,17 +175,23 @@ unsafe impl GlobalAlloc for FreeListAllocator {
                 return;
             }
 
+            // SAFETY: *free_list is a valid node pointer because we checked EMPTY_FREE_LIST above
             // SAFETY: *free_list 是一个有效的节点指针，因为我们上面检查了 EMPTY_FREE_LIST
             if unsafe { *free_list == after_new } {
+                // Merge new node into the node after it.
                 // 将新节点合并到此节点之后的节点中。
 
+                // SAFETY: Access fields
                 // SAFETY: 访问字段
                 let new_size = unsafe { size + (**free_list).size };
                 let next = unsafe { (**free_list).next };
 
+                // SAFETY: Check next continuity
                 // SAFETY: 检查 next 连续性
                 if unsafe { next != EMPTY_FREE_LIST && offset_bytes(next, (*next).size) == ptr } {
+                    // Merge into the node before this node, and the one after.
                     // 合并到此节点之前的节点，以及之后的节点。
+                    // SAFETY: Update next size, remove current node
                     // SAFETY: 更新 next 的大小，移除当前节点
                     unsafe {
                         (*next).size += new_size;
@@ -153,7 +199,9 @@ unsafe impl GlobalAlloc for FreeListAllocator {
                     }
                     return;
                 }
+                // Edit node in free list, move its position and update its size.
                 // 编辑空闲链表中的节点，移动其位置并更新其大小。
+                // SAFETY: Pointer operations
                 // SAFETY: 指针操作
                 unsafe {
                     *free_list = ptr;
@@ -164,18 +212,25 @@ unsafe impl GlobalAlloc for FreeListAllocator {
             }
 
             if unsafe { *free_list < ptr } {
+                // If adjacent, merge to the end of current node
                 // 如果相邻，则合并到当前节点的末尾
+                // SAFETY: ptr comparison and offset_bytes are pointer arithmetic
                 // SAFETY: 这里的 ptr 比较和 offset_bytes 都是指针算术
                 if unsafe { offset_bytes(*free_list, (**free_list).size) == ptr } {
+                    // Merge into the node before this node (and potentially after).
                     // 合并到此节点之前的节点，以及之后的节点。
+                    // SAFETY: Only need to update size
                     // SAFETY: 只需更新大小
                     unsafe {
                         (**free_list).size += size;
                     }
+                    // Since we merged new node to the end of existing node, no need to update pointers, just change size.
                     // 因为我们将新节点合并到现有节点的末尾，所以不需要更新指针，只需更改大小。
                     return;
                 }
+                // Create a new free list node
                 // 创建一个新的空闲链表节点
+                // SAFETY: List insertion
                 // SAFETY: 链表插入
                 unsafe {
                     (*ptr).next = *free_list;
@@ -184,6 +239,7 @@ unsafe impl GlobalAlloc for FreeListAllocator {
                 }
                 return;
             }
+            // SAFETY: Move pointer
             // SAFETY: 移动指针
             unsafe {
                 free_list = ptr::addr_of_mut!((**free_list).next);
@@ -192,18 +248,23 @@ unsafe impl GlobalAlloc for FreeListAllocator {
     }
     #[cfg(feature = "realloc")]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // 1. Calculate original block size (consistent with alloc/dealloc)
         // 1. 计算原块大小 (与 alloc/dealloc 一致)
         let old_size = full_size(layout);
+        // 2. Calculate new block size (aligned)
         // 2. 计算新块大小 (对齐)
         let new_full_size = (new_size.max(NODE_SIZE) + 15) & !15;
 
         // case A: Shrinking
         if new_full_size <= old_size {
             let diff = old_size - new_full_size;
+            // If remaining space is large enough, split and free the remainder
             // 如果剩余空间足够大，切分并释放剩余部分
             if diff >= NODE_SIZE {
                 unsafe {
                     let remainder = ptr.add(new_full_size);
+                    // Construct a Layout for freeing
+                    // align=16 is safe because all our blocks are 16-aligned
                     // 构造一个 Layout 用于释放
                     // align=16 是安全的，因为我们所有的块都是 16 对齐
                     let remainder_layout = Layout::from_size_align_unchecked(diff, 16);
@@ -214,6 +275,8 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         }
 
         // case B: Growing
+        // Try to merge backwards (In-place grow)
+        // Our list is [Sorted Descending by Address]
         // 尝试向后合并 (In-place grow)
         // 我们的链表是【地址降序】 (Descending)
         // Check if `ptr + old_size` is a free node.
@@ -227,6 +290,10 @@ unsafe impl GlobalAlloc for FreeListAllocator {
                 break;
             }
 
+            // List Descending: 2000 -> 1000 -> 500
+            // If curr (2000) > target (1500), continue searching
+            // If curr (1500) == target (1500), found it
+            // If curr (1000) < target (1500), means target is not in list (missed)
             // 链表降序: 2000 -> 1000 -> 500
             // 如果 curr (2000) > target (1500)，继续找
             // 如果 curr (1500) == target (1500)，找到
@@ -278,6 +345,7 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         }
 
         // Default Fallback: Alloc new, Copy, Dealloc old
+        // 默认回退: Alloc new, Copy, Dealloc old
         unsafe {
             let new_ptr = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
             if !new_ptr.is_null() {
@@ -294,20 +362,32 @@ fn full_size(layout: Layout) -> usize {
     (grown + 15) & !15
 }
 
+/// Round up value to the nearest multiple of increment, where increment must be a power of 2.
+/// If `value` is already a multiple of increment, it remains unchanged.
+///
 /// 将值向上取整到增量的最接近倍数，增量必须是 2 的幂。
 /// 如果 `value` 是增量的倍数，则保持不变。
 fn round_up(value: usize, increment: usize) -> usize {
     debug_assert!(increment.is_power_of_two());
+    // Calculate `value.div_ceil(increment) * increment`,
+    // utilizing the fact that `increment` is always a power of 2 to avoid integer division,
+    // as it is not always optimized away.
     // 计算 `value.div_ceil(increment) * increment`，
     // 利用 `increment` 总是 2 的幂这一事实避免使用整数除法，
     // 因为它并不总是会被优化掉。
     multiple_below(value + (increment - 1), increment)
 }
 
+/// Round down value to the nearest multiple of increment, where increment must be a power of 2.
+/// If `value` is a multiple of `increment`, it remains unchanged.
+///
 /// 将值向下取整到增量的最接近倍数，增量必须是 2 的幂。
 /// 如果 `value` 是 `increment` 的倍数，则保持不变。
 fn multiple_below(value: usize, increment: usize) -> usize {
     debug_assert!(increment.is_power_of_two());
+    // Calculate `value / increment * increment`,
+    // utilizing the fact that `increment` is always a power of 2 to avoid integer division,
+    // as it is not always optimized away.
     // 计算 `value / increment * increment`，
     // 利用 `increment` 总是 2 的幂这一事实避免使用整数除法，
     // 因为它并不总是会被优化掉。

@@ -4,6 +4,12 @@ use core::{
     ptr::{self, null_mut},
 };
 
+/// Safety Warning:
+/// Allocators in this module are designed for [Single Threaded] environments.
+/// `Sync` is implemented only to satisfy `GlobalAlloc` trait requirements.
+/// Using this allocator in a multi-threaded environment will lead to Undefined Behavior (UB).
+/// Please ensure it is used only in single-threaded environments (e.g., WASM or single-threaded embedded).
+///
 /// 安全性警示 (Safety Warning):
 /// 本模块中的分配器均为【单线程】设计。
 /// 实现了 `Sync` 仅为了满足 `GlobalAlloc` trait 的要求。
@@ -11,7 +17,14 @@ use core::{
 /// 请确保只在单线程环境（如 WASM 或单线程嵌入式环境）中使用。
 unsafe impl Sync for BumpFreeListAllocator {}
 
+/// Minimal Bump Pointer + Unordered Free List Allocator.
+///
 /// 极简 Bump Pointer + 无序链表分配器。
+///
+/// # Features
+/// - **Extreme Size**: Removes binning and merging logic to minimize code size.
+/// - **Fast Startup**: No initialization overhead.
+/// - **Fragmentation**: Does not merge memory, long-running processes will cause OOM. Only suitable for short-lived tasks.
 ///
 /// # 特性
 /// - **极致体积**：移除分箱和合并逻辑，代码量最小化。
@@ -25,6 +38,7 @@ impl BumpFreeListAllocator {
     }
 }
 
+// Linked list node: must store size because we have only one mixed list
 // 链表节点：必须存储大小，因为我们只有一个混杂的链表
 struct Node {
     next: *mut Node,
@@ -32,26 +46,35 @@ struct Node {
 }
 
 // --------------------------------------------------------------------------
+// Global State
 // 全局状态
 // --------------------------------------------------------------------------
 
+// Single unordered free list head
 // 单个无序空闲链表头
 static mut FREE_LIST: *mut Node = null_mut();
 
+// Bump Pointer State
 // Bump Pointer 状态
 static mut HEAP_TOP: usize = 0;
 static mut HEAP_END: usize = 0;
 
 unsafe impl GlobalAlloc for BumpFreeListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // 1. Unify alignment to 16 bytes.
+        // This simplifies all pointer calculations and adapts to Wasm SIMD.
         // 1. 统一对齐到 16 字节
         // 这简化了所有指针计算，并且适配 Wasm SIMD
         let align_req = layout.align().max(16);
         let size = layout.size().max(16);
 
+        // Ensure size is also a multiple of 16 for easier management
         // 确保 size 也是 16 的倍数，方便后续管理
         let size = (size + 15) & !15;
 
+        // 2. Try to allocate from the free list (First Fit).
+        // Iterate through the list to find the first block that is large enough.
+        // Note: This is an O(N) operation. However, in short-lived applications, the list is usually short.
         // 2. 尝试从空闲链表分配 (First Fit)
         // 遍历链表找到第一个足够大的块。
         // 注意：这是 O(N) 操作。但在短生命周期应用中，链表通常很短。
@@ -61,26 +84,32 @@ unsafe impl GlobalAlloc for BumpFreeListAllocator {
 
             while !curr.is_null() {
                 if (*curr).size >= size {
+                    // Found a suitable block: remove from list
                     // 找到合适的块：从链表中移除
                     *prev = (*curr).next;
                     return curr as *mut u8;
                 }
+                // Move to next node
                 // 移动到下一个节点
                 prev = ptr::addr_of_mut!((*curr).next);
                 curr = *prev;
             }
         }
 
+        // 3. No suitable block in the free list -> Use Bump Pointer allocation
         // 3. 链表中没有合适的块 -> 使用 Bump Pointer 分配
         // self.bump_alloc is unsafe
         unsafe { self.bump_alloc(size, align_req) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // 1. Calculate size (must be consistent with calculation in alloc)
         // 1. 计算大小 (必须与 alloc 中的计算方式一致)
         let size = layout.size().max(16);
         let size = (size + 15) & !15;
 
+        // 2. Insert into free list at head (O(1)).
+        // No merging, simply thread it through.
         // 2. 头插法插入空闲链表 (O(1))
         // 不进行合并，直接通过
         unsafe {
@@ -93,6 +122,7 @@ unsafe impl GlobalAlloc for BumpFreeListAllocator {
 
     #[cfg(feature = "realloc")]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // Optimization: Check if at heap top, if so, extend in place
         // 优化：检查是否在堆顶，如果是则原地扩容
         let old_size = (layout.size().max(16) + 15) & !15;
         let req_new_size = (new_size.max(16) + 15) & !15;
@@ -106,6 +136,7 @@ unsafe impl GlobalAlloc for BumpFreeListAllocator {
                 return ptr;
             }
 
+            // Try to extend heap top
             // 尝试扩容堆顶
             unsafe {
                 if HEAP_TOP + diff <= HEAP_END {
@@ -113,6 +144,7 @@ unsafe impl GlobalAlloc for BumpFreeListAllocator {
                     return ptr;
                 }
 
+                // Request more pages
                 // 申请更多页面
                 let pages_needed =
                     ((HEAP_TOP + diff - HEAP_END + PAGE_SIZE - 1) / PAGE_SIZE).max(1);
@@ -124,6 +156,7 @@ unsafe impl GlobalAlloc for BumpFreeListAllocator {
             }
         }
 
+        // Default fallback
         // 默认回退
         unsafe {
             let new_ptr = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
@@ -140,6 +173,7 @@ impl BumpFreeListAllocator {
     unsafe fn bump_alloc(&self, size: usize, align: usize) -> *mut u8 {
         unsafe {
             let mut ptr = HEAP_TOP;
+            // Alignment handling
             // 对齐处理
             ptr = (ptr + align - 1) & !(align - 1);
 
@@ -169,6 +203,9 @@ impl BumpFreeListAllocator {
 
     /// Testing only: Reset the internal state.
     /// Safety: usage is inherently unsafe if allocator is in use.
+    ///
+    /// 仅测试用：重置内部状态。
+    /// 安全性：如果分配器正在使用，未定义的行为。
     pub unsafe fn reset() {
         unsafe {
             FREE_LIST = null_mut();
