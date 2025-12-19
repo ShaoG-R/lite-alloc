@@ -1,7 +1,6 @@
 use crate::PAGE_SIZE;
 use core::{
     alloc::{GlobalAlloc, Layout},
-    cell::UnsafeCell,
     ptr::{self, null_mut},
 };
 
@@ -27,14 +26,21 @@ unsafe impl Sync for FreeListAllocator {}
 /// 分配和释放操作的时间复杂度为 O(空闲链表长度)。
 ///
 /// 空闲链表按地址排序，并且在插入新块时会合并相邻的内存块。
-pub struct FreeListAllocator {
-    free_list: UnsafeCell<*mut FreeListNode>,
-}
+pub struct FreeListAllocator;
+
+// Global State
+static mut FREE_LIST: *mut FreeListNode = EMPTY_FREE_LIST;
 
 impl FreeListAllocator {
     pub const fn new() -> Self {
-        FreeListAllocator {
-            free_list: UnsafeCell::new(EMPTY_FREE_LIST),
+        FreeListAllocator
+    }
+
+    /// Testing only: Reset the internal state.
+    /// Safety: usage is inherently unsafe if allocator is in use.
+    pub unsafe fn reset() {
+        unsafe {
+            FREE_LIST = EMPTY_FREE_LIST;
         }
     }
 }
@@ -55,11 +61,7 @@ struct FreeListNode {
 
 const NODE_SIZE: usize = core::mem::size_of::<FreeListNode>();
 
-// Safety: No one else owns the raw pointer, so we can safely transfer
-// FreeListAllocator to another thread.
-//
-// 安全性：除我们之外没有人拥有原始指针，因此我们可以安全地将
-// FreeListAllocator 转移到另一个线程。
+// Safety: No one else owns the raw pointer (conceptually), logic is same.
 unsafe impl Send for FreeListAllocator {}
 
 unsafe impl GlobalAlloc for FreeListAllocator {
@@ -87,7 +89,7 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         // 快速位运算取整 (等同于 round_up to 16)
         let size = (size + 15) & !15;
 
-        let mut free_list: *mut *mut FreeListNode = self.free_list.get();
+        let mut free_list: *mut *mut FreeListNode = ptr::addr_of_mut!(FREE_LIST);
         // Search the free list
         // 搜索空闲链表
         loop {
@@ -156,9 +158,9 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         // 用于在相邻时与下一个节点合并。
         let after_new = unsafe { offset_bytes(ptr, size) };
 
-        // SAFETY: Get UnsafeCell pointer
-        // SAFETY: 获取 UnsafeCell 指針
-        let mut free_list: *mut *mut FreeListNode = self.free_list.get();
+        // SAFETY: Get static mutable pointer
+        // SAFETY: 获取静态可变指针
+        let mut free_list: *mut *mut FreeListNode = ptr::addr_of_mut!(FREE_LIST);
         // Insert into free list, sorted by pointer descending.
         // 插入到空闲链表中，该链表按指针降序存储。
         loop {
@@ -283,7 +285,7 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         let needed = new_full_size - old_size;
         let target_addr = unsafe { ptr.add(old_size) as *mut FreeListNode };
 
-        let mut prev = self.free_list.get();
+        let mut prev = ptr::addr_of_mut!(FREE_LIST);
         loop {
             let curr = unsafe { *prev };
             if curr == EMPTY_FREE_LIST {
@@ -402,26 +404,43 @@ unsafe fn offset_bytes(ptr: *mut FreeListNode, offset: usize) -> *mut FreeListNo
 mod tests {
     use super::*;
     use crate::reset_heap;
+    use std::sync::{Mutex, MutexGuard};
 
-    struct SafeAllocator(FreeListAllocator);
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct SafeAllocator {
+        inner: FreeListAllocator,
+        _guard: MutexGuard<'static, ()>,
+    }
 
     impl SafeAllocator {
         fn new() -> Self {
-            Self(FreeListAllocator::new())
+            let guard = TEST_MUTEX.lock().unwrap();
+            unsafe {
+                FreeListAllocator::reset();
+                reset_heap();
+                Self {
+                    inner: FreeListAllocator::new(),
+                    _guard: guard,
+                }
+            }
         }
 
         fn alloc(&self, layout: Layout) -> *mut u8 {
-            unsafe { self.0.alloc(layout) }
+            unsafe { self.inner.alloc(layout) }
         }
 
         fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { self.0.dealloc(ptr, layout) }
+            unsafe { self.inner.dealloc(ptr, layout) }
         }
     }
 
     impl Drop for SafeAllocator {
         fn drop(&mut self) {
-            reset_heap();
+            unsafe {
+                FreeListAllocator::reset();
+                reset_heap();
+            }
         }
     }
 
@@ -609,7 +628,7 @@ mod tests {
         let new_layout = Layout::from_size_align(new_size, 16).unwrap();
 
         // We need to call realloc from GlobalAlloc trait
-        let realloc_ptr = unsafe { allocator.0.realloc(ptr, layout, new_size) };
+        let realloc_ptr = unsafe { allocator.inner.realloc(ptr, layout, new_size) };
 
         // Custom impl is In-Place.
         #[cfg(feature = "realloc")]
@@ -638,7 +657,7 @@ mod tests {
         allocator.dealloc(ptr1, layout);
 
         let new_size = 128;
-        let ptr2_new = unsafe { allocator.0.realloc(ptr2, layout, new_size) };
+        let ptr2_new = unsafe { allocator.inner.realloc(ptr2, layout, new_size) };
 
         #[cfg(feature = "realloc")]
         assert_eq!(ptr2, ptr2_new);

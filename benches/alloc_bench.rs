@@ -41,6 +41,7 @@ trait BenchmarkAllocator: GlobalAlloc {
 impl BenchmarkAllocator for FreeListAllocator {
     unsafe fn reset_env() {
         lite_alloc::reset_heap();
+        unsafe { FreeListAllocator::reset() };
     }
     fn create() -> Self {
         FreeListAllocator::new()

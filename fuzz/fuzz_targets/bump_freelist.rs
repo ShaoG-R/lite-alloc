@@ -6,9 +6,9 @@ use std::alloc::{GlobalAlloc, Layout};
 fuzz_target!(|data: &[u8]| {
     // Reset global state and mock heap memory before each Fuzz iteration
     // 每次 Fuzz 迭代开始前，重置全局状态和模拟堆内存
+    reset_heap();
     unsafe {
         BumpFreeListAllocator::reset();
-        reset_heap();
     }
 
     let allocator = BumpFreeListAllocator::new();

@@ -7,6 +7,9 @@ fuzz_target!(|data: &[u8]| {
     // Reset mock heap memory before each Fuzz iteration to ensure a clean environment
     // 每次 Fuzz 迭代开始前，重置模拟堆内存，确保环境干净
     reset_heap();
+    unsafe {
+        FreeListAllocator::reset();
+    }
 
     let allocator = FreeListAllocator::new();
     // Record allocated blocks: (pointer, layout)
