@@ -1,0 +1,21 @@
+[package]
+name = "lite_alloc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[features]
+realloc = []
+
+[dev-dependencies]
+criterion = "0.7"
+
+[profile.release]
+lto = true
+# debug = true
+opt-level = "z"
+
+[[bench]]
+name = "alloc_bench"
+harness = false
