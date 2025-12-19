@@ -14,7 +14,14 @@ COPY . .
 # 预先编译 fuzz target 以便缓存依赖（可选，但推荐）
 # 这里我们尝试先编译一下，如果不成功也没关系，运行时会编译
 # 使用 --sanitizer address 是默认选项，通常最有用
-RUN cargo fuzz build fuzz_target_1 --sanitizer address || true
+RUN cargo fuzz build --sanitizer address || true
 
-# 设置默认命令
-CMD ["cargo", "fuzz", "run", "fuzz_target_1", "--", "-max_total_time=60"]
+# 默认测试所有 Fuzz Target (默认配置 & realloc 配置)
+# 遍历每个 target，分别运行默认和开启 realloc feature 的情况
+CMD ["bash", "-c", "targets=\"freelist bump_freelist segregated_bump\"; \
+    for target in $targets; do \
+    echo \"\n\n[+] Testing $target (Default Features) ...\"; \
+    cargo fuzz run $target -- -max_total_time=60 || exit 1; \
+    echo \"\n\n[+] Testing $target (Feature: realloc) ...\"; \
+    cargo fuzz run $target --features realloc -- -max_total_time=60 || exit 1; \
+    done"]

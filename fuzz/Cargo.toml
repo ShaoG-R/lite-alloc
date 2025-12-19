@@ -7,15 +7,33 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+realloc = ["lite_alloc/realloc"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 
 [dependencies.lite_alloc]
 path = ".."
 
+
 [[bin]]
-name = "fuzz_target_1"
-path = "fuzz_targets/fuzz_target_1.rs"
+name = "freelist"
+path = "fuzz_targets/freelist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bump_freelist"
+path = "fuzz_targets/bump_freelist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "segregated_bump"
+path = "fuzz_targets/segregated_bump.rs"
 test = false
 doc = false
 bench = false

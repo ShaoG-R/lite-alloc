@@ -1,0 +1,30 @@
+name: CI
+
+on: [push]
+
+jobs:
+  build-test-fuzz:
+    name: Build, Test and Fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Test
+        run: cargo test --verbose
+
+      - name: Test with Realloc
+        run: cargo test --features realloc --verbose
+
+      - name: Build Fuzz Docker Image
+        run: docker build -t lite-alloc-fuzz .
+
+      - name: Run Fuzz Tests (Docker)
+        # This will run the default CMD defined in Dockerfile:
+        # bash -c "cargo fuzz run freelist ... && cargo fuzz run bump_freelist ... && ..."
+        run: docker run --rm lite-alloc-fuzz
